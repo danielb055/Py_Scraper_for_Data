@@ -3,13 +3,13 @@ from bs4 import BeautifulSoup
 import json
 import csv
 from colorama import Fore, Style
+import time
 
 # Set the number of movies to scrape
-NUM_MOVIES_TO_SCRAPE = 1  # Change this value to the number of movies you want
+NUM_MOVIES_TO_SCRAPE = 10  # Change this value to the number of movies you want
 
-# Define the target URL
+# Define the base URL of the movie list
 BASE_URL = "https://www.imdb.com/list/ls006266261/"
-
 
 # Function for color-coded logging
 def log(message, level="info"):
@@ -56,10 +56,27 @@ def query_ollama(content):
 # Function to scrape movie details using Ollama
 def scrape_movie_details(movie_url):
     log(f"Scraping movie details from {movie_url}...", "info")
-    response = requests.get(movie_url)
-    if response.status_code != 200:
-        log(f"Failed to fetch the movie page: {movie_url}", "error")
-        return None
+    
+    # Add headers to mimic a browser request
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/87.0.4280.88 Safari/537.36",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Referer": BASE_URL
+    }
+    
+    # Retry logic
+    retries = 3
+    for i in range(retries):
+        response = requests.get(movie_url, headers=headers, timeout=10)
+        if response.status_code == 200:
+            log(f"Successfully fetched movie details page: {movie_url}", "success")
+            break
+        elif i < retries - 1:
+            log(f"Retrying ({i + 1}/{retries}) after failure to fetch: {response.status_code}", "warning")
+            time.sleep(2 ** i)
+        else:
+            log(f"Failed to fetch movie page: {movie_url} after {retries} retries.", "error")
+            return None
 
     soup = BeautifulSoup(response.text, "html.parser")
     page_content = soup.get_text()
@@ -68,36 +85,48 @@ def scrape_movie_details(movie_url):
     log(f"Successfully extracted details for movie: {movie_details.get('Title', 'N/A')}", "success")
     return movie_details
 
-# Function to scrape movies starting from the base URL
+# Function to scrape movies from the base URL
 def scrape_movies(base_url, max_movies):
     movies = []
-    page = 1
     log(f"Starting to scrape movies. Target: {max_movies} movies.", "info")
-    while len(movies) < max_movies:
-        log(f"Scraping movie list from page {page}...", "info")
-        response = requests.get(f"{base_url}/movies?page={page}")
+    
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/87.0.4280.88 Safari/537.36",
+        "Accept-Language": "en-US,en;q=0.9"
+    }
+    
+    try:
+        response = requests.get(base_url, headers=headers, timeout=10)
         if response.status_code != 200:
-            log(f"Failed to fetch movie list from page {page}.", "error")
-            break
-        
+            log(f"Failed to fetch the base URL: {base_url} with status code {response.status_code}.", "error")
+            return movies
+
         soup = BeautifulSoup(response.text, "html.parser")
-        movie_links = soup.select(".movie-link")  # Replace '.movie-link' with the actual selector for movie titles
-        if not movie_links:
-            log(f"No movie links found on page {page}.", "error")
-            break
+        # Selector for movie links
+        movie_links = soup.select('a.ipc-title-link-wrapper')
+        log(f"Found {len(movie_links)} movie links on the page.", "info")
         
-        log(f"Found {len(movie_links)} movie links on page {page}.", "info")
-        for link in movie_links:
-            movie_url = f"{BASE_URL}{link['href']}"
+        for i, link in enumerate(movie_links):
+            if len(movies) >= max_movies:
+                break
+            
+            href = link.get("href")
+            if not href:
+                log(f"No href found for movie link at position {i}. Skipping.", "warning")
+                continue
+
+            movie_url = f"https://www.imdb.com{href}"  # Construct the full URL
             movie_details = scrape_movie_details(movie_url)
             if movie_details:
                 movies.append(movie_details)
                 log(f"Added movie: {movie_details['Title']} (ID: {movie_details['ID']})", "success")
-            if len(movies) >= max_movies:
-                break
-        page += 1
-    log(f"Scraped a total of {len(movies)} movies.", "success")
-    return movies
+        
+        log(f"Scraped a total of {len(movies)} movies.", "success")
+        return movies
+
+    except requests.exceptions.RequestException as e:
+        log(f"Error occurred during the GET request: {e}", "error")
+        return movies
 
 # Generate CSV and SQL files
 def generate_files(movies):
