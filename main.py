@@ -2,28 +2,13 @@ import requests
 from bs4 import BeautifulSoup
 import json
 import csv
-from colorama import Fore, Style
-import time
 
-from movie_scrapper import scrape_movie_details_2
-import xpaths
+from coded_logger import log
+from movie_scrapper import scrape_movie_details
+from scrapper_with_scrolling import scrape_movies_with_scroll
+from settings import BASE_URL, NUM_MOVIES_TO_SCRAPE
+from xpaths import X_PATHS
 
-# Set the number of movies to scrape
-NUM_MOVIES_TO_SCRAPE = 1000 # Change this value to the number of movies you want
-
-# Define the base URL of the movie list
-BASE_URL = "https://www.imdb.com/list/ls006266261/"
-
-# Function for color-coded logging
-def log(message, level="info"):
-    if level == "info":
-        print(f"{Fore.CYAN}[INFO] {message}{Style.RESET_ALL}")
-    elif level == "success":
-        print(f"{Fore.GREEN}[SUCCESS] {message}{Style.RESET_ALL}")
-    elif level == "warning":
-        print(f"{Fore.YELLOW}[WARNING] {message}{Style.RESET_ALL}")
-    elif level == "error":
-        print(f"{Fore.RED}[ERROR] {message}{Style.RESET_ALL}")
 
 # Function to query Ollama with the movie page content
 def query_ollama(content):
@@ -55,39 +40,6 @@ def query_ollama(content):
     result = response.json()
     log("Received response from Ollama.", "success")
     return json.loads(result.get("choices")[0]["message"]["content"])
-
-# Function to scrape movie details using Ollama
-def scrape_movie_details(movie_url):
-    log(f"Scraping movie details from {movie_url}...", "info")
-    
-    # Add headers to mimic a browser request
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/87.0.4280.88 Safari/537.36",
-        "Accept-Language": "en-US,en;q=0.9",
-        "Referer": BASE_URL
-    }
-    
-    # Retry logic
-    retries = 3
-    for i in range(retries):
-        response = requests.get(movie_url, headers=headers, timeout=10)
-        if response.status_code == 200:
-            log(f"Successfully fetched movie details page: {movie_url}", "success")
-            break
-        elif i < retries - 1:
-            log(f"Retrying ({i + 1}/{retries}) after failure to fetch: {response.status_code}", "warning")
-            time.sleep(2 ** i)
-        else:
-            log(f"Failed to fetch movie page: {movie_url} after {retries} retries.", "error")
-            return None
-
-    soup = BeautifulSoup(response.text, "html.parser")
-    # page_content = soup.get_text()
-    page_content = str(soup)
-    log("Extracted page content, sending it to Ollama...", "info")
-    movie_details = scrape_movie_details_2(page_content,xpaths=xpaths.X_PATHS)
-    log(f"Successfully extracted details for movie: {movie_details.get('Title', 'N/A')}", "success")
-    return movie_details
 
 # Function to scrape movies from the base URL
 def scrape_movies(base_url, max_movies):
@@ -228,7 +180,7 @@ def generate_files(movies):
 # Main function
 def main():
     log("Starting the movie scraper...", "info")
-    movies = scrape_movies(BASE_URL, max_movies=NUM_MOVIES_TO_SCRAPE)
+    movies = scrape_movies_with_scroll(BASE_URL, max_movies=NUM_MOVIES_TO_SCRAPE, xpaths=X_PATHS)
     if not movies:
         log("No movies were scraped. Exiting.", "error")
         return
