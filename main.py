@@ -5,8 +5,11 @@ import csv
 from colorama import Fore, Style
 import time
 
+from movie_scrapper import scrape_movie_details_2
+import xpaths
+
 # Set the number of movies to scrape
-NUM_MOVIES_TO_SCRAPE = 10  # Change this value to the number of movies you want
+NUM_MOVIES_TO_SCRAPE = 1000 # Change this value to the number of movies you want
 
 # Define the base URL of the movie list
 BASE_URL = "https://www.imdb.com/list/ls006266261/"
@@ -27,7 +30,7 @@ def query_ollama(content):
     OLLAMA_URL = "http://localhost:11434/api/chat"
     headers = {"Content-Type": "application/json"}
     prompt = f"""
-    You are a movie details extractor. Analyze the provided webpage content and extract the following information as JSON:
+    Instructions: You are a movie details extractor. Analyze the provided webpage content and extract the following information as JSON:
     - ID
     - Title
     - Duration
@@ -44,7 +47,7 @@ def query_ollama(content):
     
     {content}
     """
-    data = {"model": "llama3.2", "messages": [{"role": "user", "content": prompt}]}
+    data = {"model": "llama3.1", "messages": [{"role": "user", "content": prompt}]}
     
     log("Sending content to Ollama for processing...", "info")
     response = requests.post(OLLAMA_URL, headers=headers, data=json.dumps(data))
@@ -79,9 +82,10 @@ def scrape_movie_details(movie_url):
             return None
 
     soup = BeautifulSoup(response.text, "html.parser")
-    page_content = soup.get_text()
+    # page_content = soup.get_text()
+    page_content = str(soup)
     log("Extracted page content, sending it to Ollama...", "info")
-    movie_details = query_ollama(page_content)
+    movie_details = scrape_movie_details_2(page_content,xpaths=xpaths.X_PATHS)
     log(f"Successfully extracted details for movie: {movie_details.get('Title', 'N/A')}", "success")
     return movie_details
 
@@ -119,7 +123,7 @@ def scrape_movies(base_url, max_movies):
             movie_details = scrape_movie_details(movie_url)
             if movie_details:
                 movies.append(movie_details)
-                log(f"Added movie: {movie_details['Title']} (ID: {movie_details['ID']})", "success")
+                log(f"Added movie: {movie_details['Title']}", "success")
         
         log(f"Scraped a total of {len(movies)} movies.", "success")
         return movies
@@ -143,30 +147,83 @@ def generate_files(movies):
     # Write to SQL
     with open("insert_movies.sql", "w", encoding="utf-8") as sqlfile:
         for movie in movies:
+            # Escape single quotes for MSSQL
+            def escape(value):
+                return value.replace("'", "''") if isinstance(value, str) else value
+
+            # Handle nullable fields
+            def nullable(value):
+                return f"'{escape(value)}'" if value else "NULL"
+
+            # Extract director's first and last name
+            director_name_parts = movie.get("Director", "").split(" ")
+            first_name = director_name_parts[0] if len(director_name_parts) > 0 else "N/A"
+            last_name = " ".join(director_name_parts[1:]) if len(director_name_parts) > 1 else "N/A"
+
             sql = f"""
-            INSERT INTO Movies (Id, Title, Duration, Rating, Language, Country, ReleaseYear, Genres, Plot, Rated)
-            VALUES (
-                '{movie["ID"]}', '{movie["Title"].replace("'", "''")}', '{movie["Duration"]}',
-                '{movie["Rating"]}', '{movie["Language"].replace("'", "''")}', '{movie["Country"].replace("'", "''")}',
-                '{movie["ReleaseYear"]}', '{movie["Genres"].replace("'", "''")}', '{movie["StoryLine"].replace("'", "''")}',
-                '{movie["Rated"]}'
-            );
+            -- Insert movie details into Movies table
+            IF NOT EXISTS (
+                SELECT 1 
+                FROM Movies 
+                WHERE Title = {nullable(movie.get("Title"))}
+                AND ReleaseYear = {nullable(movie.get("ReleaseYear"))}
+            )
+            BEGIN
+                INSERT INTO Movies (Title, Duration, Rating, Language, Country, ReleaseYear, Genres, Plot, Rated)
+                VALUES (
+                    {nullable(movie.get("Title"))},
+                    {nullable(movie.get("Duration"))},
+                    {movie.get("Rating", "NULL")},
+                    {nullable(movie.get("Language"))},
+                    {nullable(movie.get("Country"))},
+                    {nullable(movie.get("ReleaseYear"))},
+                    {nullable(movie.get("Genres"))},
+                    {nullable(movie.get("StoryLine"))},
+                    {nullable(movie.get("Rated"))}
+                );
+            END;
 
-            INSERT INTO Directors (FirstName, LastName, Country)
-            VALUES (
-                '{movie["Director"].split(" ")[0]}', 
-                '{' '.join(movie["Director"].split(" ")[1:]) if len(movie["Director"].split(" ")) > 1 else "N/A"}',
-                '{movie["Country"].replace("'", "''")}'
-            );
+            -- Insert director details into Directors table
+            IF NOT EXISTS (
+                SELECT 1 
+                FROM Directors 
+                WHERE FirstName = {nullable(first_name)}
+                AND LastName = {nullable(last_name)}
+                AND Country = {nullable(movie.get("Country"))}
+            )
+            BEGIN
+                INSERT INTO Directors (FirstName, LastName, Country)
+                VALUES (
+                    {nullable(first_name)}, 
+                    {nullable(last_name)},
+                    {nullable(movie.get("Country"))}
+                );
+            END;
 
-            INSERT INTO Director_Movie (DirectorId, MovieId)
-            VALUES (
-                (SELECT Id FROM Directors WHERE FirstName='{movie["Director"].split(" ")[0]}' LIMIT 1),
-                '{movie["ID"]}'
-            );
+            -- Associate director with movie in Director_Movie table
+            IF NOT EXISTS (
+                SELECT 1 
+                FROM Director_Movie dm
+                INNER JOIN Directors d ON dm.DirectorId = d.Id
+                INNER JOIN Movies m ON dm.MovieId = m.Id
+                WHERE d.FirstName = {nullable(first_name)} 
+                AND d.LastName = {nullable(last_name)} 
+                AND m.Title = {nullable(movie.get("Title"))}
+                AND m.ReleaseYear = {nullable(movie.get("ReleaseYear"))}
+            )
+            BEGIN
+                INSERT INTO Director_Movie (DirectorId, MovieId)
+                VALUES (
+                    (SELECT TOP 1 Id FROM Directors WHERE FirstName = {nullable(first_name)} AND LastName = {nullable(last_name)}),
+                    (SELECT TOP 1 Id FROM Movies WHERE Title = {nullable(movie.get("Title"))} AND ReleaseYear = {nullable(movie.get("ReleaseYear"))})
+                );
+            END;
             """
             sqlfile.write(sql)
+
     log("SQL file generated: insert_movies.sql", "success")
+
+
 
 # Main function
 def main():
